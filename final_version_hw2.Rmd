@@ -1,0 +1,252 @@
+---
+title: "Untitled"
+author: "Sijia Wu"
+date: "2025-10-12"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(shiny)
+library(shinythemes)
+library(readr)
+library(tidyverse)
+library(ggplot2)
+library(maps)
+library(lubridate)
+library(scales)
+```
+
+
+```{r}
+data = read.csv("Wildfire_Dataset.csv")
+```
+
+
+```{r}
+na_summary <- data %>% summarise(across(everything(), ~sum(is.na(.))))
+na_summary
+```
+
+```{r}
+df <- data %>%
+  filter(Wildfire != "No") %>% 
+  mutate(
+    datetime = as.Date(datetime),
+    month = lubridate::month(datetime),
+    year = lubridate::year(datetime),
+    season = case_when(
+      month %in% c(12, 1, 2)  ~ "Winter",
+      month %in% c(3, 4, 5)   ~ "Spring",
+      month %in% c(6, 7, 8)   ~ "Summer",
+      month %in% c(9, 10, 11) ~ "Fall"
+    ),
+    srad = as.numeric(srad)   
+  ) %>%
+  mutate(
+    state_raw = maps::map.where("state", longitude, latitude), 
+    state_raw = ifelse(is.na(state_raw), NA, sub(":.*", "", state_raw)),
+    State     = stringr::str_to_title(state_raw) 
+  )
+
+SRAD_MIN <- floor(min(df$srad, na.rm = TRUE))
+SRAD_MAX <- ceiling(max(df$srad, na.rm = TRUE))
+
+STATE_CHOICES <- sort(unique(na.omit(df$State)))
+
+df
+```
+
+
+
+```{r}
+overlay_histogram <- function(df, selected_) {
+  sub_df <- df[selected_, , drop = FALSE]
+  min_year <- floor(min(df$year, na.rm = TRUE))
+  max_year <- ceiling(max(df$year, na.rm = TRUE))
+  origin <- min_year - 0.5
+
+  ggplot(df, aes(year)) +
+    geom_histogram(binwidth = 1, boundary = origin,
+                   fill = "#A8CBE8", alpha = 0.4) +
+    geom_histogram(data = sub_df, aes(year),
+                   binwidth = 1, boundary = origin,
+                   fill = "#1F78B4") +
+    scale_y_continuous(expand = c(0, 0, 0.05, 0)) +
+    scale_x_continuous(breaks = min_year:max_year) +
+    labs(x = "Year", y = "Wildfire count") +
+    theme_minimal(base_size = 13) +
+    theme(
+      panel.grid = element_blank(), 
+      axis.text = element_text(color = "black"),
+      axis.title = element_text(color = "black", face = "bold")
+    )
+}
+
+scatterplot <- function(df, selected_) {
+  sel_df <- df[selected_, , drop = FALSE]
+  if (nrow(sel_df) == 0) {
+    return(ggplot() + theme_void() +
+             annotate("text", x = 0, y = 0, label = "No points in current selection"))
+  }
+
+  rng  <- range(sel_df$srad, na.rm = TRUE)
+  brks <- pretty(rng, n = 5)
+
+  ggplot() +
+    borders("usa", colour = "gray80", fill = "gray95") +
+    geom_point(
+      data = sel_df,
+      aes(longitude, latitude, color = srad),
+      alpha = 0.8, size = 1.8
+    ) +
+    scale_color_gradientn(
+      colors = c("yellow", "orange", "red", "darkred"),
+      limits = rng,
+      breaks = brks,
+      labels = label_number(accuracy = 1),
+      name = "Solar radiation (W/m²)"
+    ) +
+    coord_fixed(1.3, xlim = c(-125, -66), ylim = c(25, 50)) +
+    theme_void(base_size = 13) +
+    theme(legend.position = "bottom")
+}
+
+state_scatterplot <- function(df_state) {
+  if (nrow(df_state) == 0) {
+    return(ggplot() + theme_void() +
+             annotate("text", x = 0, y = 0, label = "No data for this state / filters"))
+  }
+
+  state_key <- tolower(unique(df_state$State)[1])
+  us_map <- map_data("state") %>% filter(region == state_key)
+  rng  <- range(df_state$srad, na.rm = TRUE)
+  brks <- pretty(rng, n = 5)
+
+  ggplot() +
+    geom_polygon(data = us_map, aes(long, lat, group = group),
+                 fill = "gray90", color = "gray70") +
+    geom_point(
+      data = df_state,
+      aes(longitude, latitude, color = srad),
+      alpha = 0.8, size = 1.8
+    ) +
+    scale_color_gradientn(
+      colors = c("yellow", "orange", "red", "darkred"),
+      limits = rng,
+      breaks = brks,
+      labels = label_number(accuracy = 1),
+      name = "Solar radiation (W/m²)"
+    ) +
+    coord_quickmap() +
+    theme_void(base_size = 13) +
+    theme(legend.position = "bottom")
+}
+
+ui <- fluidPage(
+  theme = shinytheme("flatly"),
+  titlePanel("US Wildfire Ignitions"),
+  p("Select a season and solar radiation range. Drag across the year histogram to filter by year."),
+  fluidRow(
+    column(
+      4,
+      selectInput(
+        "season", "Season:",
+        choices  = c("All", "Winter", "Spring", "Summer", "Fall"),
+        selected = "All"
+      )
+    ),
+    column(
+      8,
+      sliderInput(
+        "srad", "Solar radiation (W/m²):",
+        min = SRAD_MIN, max = SRAD_MAX,
+        value = c(SRAD_MIN, SRAD_MAX),
+        step = 1, sep = "", width = "100%"
+      )
+    )
+  ),
+
+  tabsetPanel(
+    tabPanel("Overview",
+             fluidRow(
+               column(5,
+                      plotOutput("histogram",
+                                 brush = brushOpts("plot_brush", direction = "x"),
+                                 height = 250)),
+               column(7, plotOutput("map", height = 600)))
+    ),
+    tabPanel("State Explorer",
+             selectInput("state", "State:", choices = STATE_CHOICES),
+             fluidRow(
+               column(7, plotOutput("state_map", height = 520)),
+               column(5, plotOutput("state_hist", height = 520))
+             ))
+  )
+)
+
+server <- function(input, output) {
+
+  rentals <- reactive({
+    d <- if (input$season == "All") df else filter(df, season == input$season)
+    d %>% filter(srad >= input$srad[1], srad <= input$srad[2])
+  })
+
+  selected <- reactiveVal(NULL)
+
+  observe({
+    d <- rentals()
+    if (is.null(selected()) || length(selected()) != nrow(d)) {
+      selected(rep(TRUE, nrow(d)))
+    }
+  })
+
+  observeEvent(input$plot_brush, {
+    b <- input$plot_brush
+    d <- rentals()
+    if (is.null(b) || nrow(d) == 0) return(selected(rep(TRUE, nrow(d))))
+    yr_min <- round(b$xmin); yr_max <- round(b$xmax)
+    idx <- with(d, year >= yr_min & year <= yr_max)
+    if (any(idx, na.rm = TRUE)) selected(idx) else selected(rep(TRUE, nrow(d)))
+  })
+
+  output$histogram <- renderPlot({
+    d <- rentals(); validate(need(nrow(d) > 0, "No data"))
+    sel <- selected(); if (is.null(sel) || length(sel) != nrow(d)) sel <- rep(TRUE, nrow(d))
+    overlay_histogram(d, sel)
+  })
+
+  output$map <- renderPlot({
+    d <- rentals(); validate(need(nrow(d) > 0, "No data"))
+    sel <- selected(); if (is.null(sel) || length(sel) != nrow(d)) sel <- rep(TRUE, nrow(d))
+    scatterplot(d, sel)
+  })
+
+  state_df <- reactive({
+    d <- rentals()
+    d %>% filter(!is.na(State), State == input$state)
+  })
+
+  output$state_map <- renderPlot({
+    ds <- state_df(); validate(need(nrow(ds) > 0, "No data for this state"))
+    state_scatterplot(ds)
+  })
+
+  output$state_hist <- renderPlot({
+    ds <- state_df(); validate(need(nrow(ds) > 0, "No data"))
+    ggplot(ds, aes(year)) +
+      geom_histogram(binwidth = 1, fill = "#1F78B4", alpha = 0.7) +
+      labs(x = "Year", y = paste("Wildfire count in", input$state)) +
+      theme_minimal(base_size = 13)+
+      theme(
+        panel.grid = element_blank()
+      )
+  })
+}
+
+shinyApp(ui, server)
+
+```
